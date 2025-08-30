@@ -16,7 +16,7 @@ from autogen_core.models import (
     SystemMessage,
     UserMessage,
 )
-from autogen_core.tools import BaseTool
+from autogen_core.tools import BaseTool, ParametersSchema, ToolSchema
 from autogen_ext.models.semantic_kernel import SKChatCompletionAdapter
 from openai.types.chat.chat_completion_chunk import (
     ChatCompletionChunk,
@@ -336,6 +336,45 @@ async def test_sk_chat_completion_with_tools(sk_client: AzureChatCompletion) -> 
 
 
 @pytest.mark.asyncio
+async def test_sk_chat_completion_with_prompt_tools(sk_client: AzureChatCompletion) -> None:
+    # Create adapter
+    adapter = SKChatCompletionAdapter(sk_client)
+
+    # Create kernel
+    kernel = Kernel(memory=NullMemory())
+
+    # Create calculator tool instance
+    tool: ToolSchema = ToolSchema(
+        name="calculator",
+        description="Add two numbers together",
+        parameters=ParametersSchema(
+            type="object",
+            properties={
+                "a": {"type": "number", "description": "First number"},
+                "b": {"type": "number", "description": "Second number"},
+            },
+            required=["a", "b"],
+        ),
+    )
+
+    # Test messages
+    messages: list[LLMMessage] = [
+        SystemMessage(content="You are a helpful assistant."),
+        UserMessage(content="What is 2 + 2?", source="user"),
+    ]
+
+    # Call create with tool
+    result = await adapter.create(messages=messages, tools=[tool], extra_create_args={"kernel": kernel})
+
+    # Verify response
+    assert isinstance(result.content, list)
+    assert result.finish_reason == "function_calls"
+    assert result.usage.prompt_tokens >= 0
+    assert result.usage.completion_tokens >= 0
+    assert not result.cached
+
+
+@pytest.mark.asyncio
 async def test_sk_chat_completion_without_tools(
     sk_client: AzureChatCompletion, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -453,7 +492,9 @@ async def test_sk_chat_completion_default_model_info(sk_client: AzureChatComplet
 @pytest.mark.asyncio
 async def test_sk_chat_completion_custom_model_info(sk_client: AzureChatCompletion) -> None:
     # Create custom model info
-    custom_model_info = ModelInfo(vision=True, function_calling=True, json_output=True, family=ModelFamily.GPT_4)
+    custom_model_info = ModelInfo(
+        vision=True, function_calling=True, json_output=True, family=ModelFamily.GPT_4, structured_output=False
+    )
 
     # Create adapter with custom model_info
     adapter = SKChatCompletionAdapter(sk_client, model_info=custom_model_info)
@@ -522,7 +563,9 @@ async def test_sk_chat_completion_r1_content() -> None:
     adapter = SKChatCompletionAdapter(
         mock_client,
         kernel=kernel,
-        model_info=ModelInfo(vision=False, function_calling=False, json_output=False, family=ModelFamily.R1),
+        model_info=ModelInfo(
+            vision=False, function_calling=False, json_output=False, family=ModelFamily.R1, structured_output=False
+        ),
     )
 
     result = await adapter.create(messages=[UserMessage(content="Say hello!", source="user")])

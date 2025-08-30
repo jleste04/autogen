@@ -8,6 +8,8 @@ import "antd/dist/reset.css";
 import SideBar from "./sidebar";
 import ContentHeader from "./contentheader";
 import { ConfigProvider, theme } from "antd";
+import { useAuth } from "../auth/context";
+import ProtectedRoute from "../auth/protected";
 
 const classNames = (...classes: (string | undefined | boolean)[]) => {
   return classes.filter(Boolean).join(" ");
@@ -28,12 +30,13 @@ const Layout = ({
   link,
   children,
   showHeader = true,
-  restricted = false,
+  restricted = true, // Default to restricted for security
 }: Props) => {
   const { darkMode } = React.useContext(appContext);
   const { sidebar } = useConfigStore();
   const { isExpanded } = sidebar;
   const [isMobileMenuOpen, setIsMobileMenuOpen] = React.useState(false);
+  const { authType } = useAuth();
 
   // Close mobile menu on route change
   React.useEffect(() => {
@@ -117,21 +120,91 @@ const Layout = ({
     </div>
   );
 
-  // Handle restricted content
-  if (restricted) {
-    return (
-      <appContext.Consumer>
-        {(context: any) => {
-          if (context.user) {
-            return layoutContent;
-          }
-          return null;
-        }}
-      </appContext.Consumer>
-    );
+  // If page is restricted and auth is not 'none', wrap with ProtectedRoute
+  if (restricted && authType !== "none") {
+    return <ProtectedRoute>{layoutContent}</ProtectedRoute>;
   }
 
+  // Otherwise, render without protection
   return layoutContent;
 };
 
 export default Layout;
+
+// Lite Layout Component for simplified lite mode
+type LiteLayoutProps = {
+  children?: React.ReactNode;
+  showHeader?: boolean;
+  showFooter?: boolean;
+  restricted?: boolean;
+};
+
+export const LiteLayout = ({
+  children,
+  showHeader = true,
+  showFooter = true,
+  restricted = true,
+}: LiteLayoutProps) => {
+  const { darkMode } = React.useContext(appContext);
+  const { authType } = useAuth();
+  const { setHeader } = useConfigStore();
+
+  React.useEffect(() => {
+    document.getElementsByTagName("html")[0].className = `${
+      darkMode === "dark" ? "dark bg-primary" : "light bg-primary"
+    }`;
+  }, [darkMode]);
+
+  // Set up lite mode breadcrumbs and header
+  React.useEffect(() => {
+    setHeader({
+      title: "AutoGen Studio Lite",
+      breadcrumbs: [
+        {
+          name: "Home",
+          href: "/",
+          current: false,
+        },
+        {
+          name: "Lite Mode",
+          href: "/lite",
+          current: true,
+        },
+      ],
+    });
+  }, [setHeader]);
+
+  const layoutContent = (
+    <div className="min-h-screen flex flex-col">
+      {showHeader && (
+        <ContentHeader
+          isMobileMenuOpen={false}
+          onMobileMenuToggle={() => {}} // No mobile menu in lite mode
+        />
+      )}
+
+      <ConfigProvider
+        theme={{
+          token: {
+            borderRadius: 4,
+            colorBgBase: darkMode === "dark" ? "#05080C" : "#ffffff",
+          },
+          algorithm:
+            darkMode === "dark" ? theme.darkAlgorithm : theme.defaultAlgorithm,
+        }}
+      >
+        <main className="flex-1 p-2 text-primary">{children}</main>
+      </ConfigProvider>
+
+      {showFooter && <Footer />}
+    </div>
+  );
+
+  // If page is restricted and auth is not 'none', wrap with ProtectedRoute
+  if (restricted && authType !== "none") {
+    return <ProtectedRoute>{layoutContent}</ProtectedRoute>;
+  }
+
+  // Otherwise, render without protection
+  return layoutContent;
+};

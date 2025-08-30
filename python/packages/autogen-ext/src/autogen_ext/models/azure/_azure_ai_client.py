@@ -3,7 +3,7 @@ import logging
 import re
 from asyncio import Task
 from inspect import getfullargspec
-from typing import Any, Dict, List, Mapping, Optional, Sequence, cast
+from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Union, cast
 
 from autogen_core import EVENT_LOGGER_NAME, CancellationToken, FunctionCall, Image
 from autogen_core.logging import LLMCallEvent, LLMStreamEndEvent, LLMStreamStartEvent
@@ -28,6 +28,8 @@ from azure.ai.inference.models import (
 )
 from azure.ai.inference.models import (
     ChatCompletions,
+    ChatCompletionsNamedToolChoice,
+    ChatCompletionsNamedToolChoiceFunction,
     ChatCompletionsToolCall,
     ChatCompletionsToolDefinition,
     CompletionsFinishReason,
@@ -52,7 +54,8 @@ from azure.ai.inference.models import (
 from azure.ai.inference.models import (
     UserMessage as AzureUserMessage,
 )
-from typing_extensions import AsyncGenerator, Union, Unpack
+from pydantic import BaseModel
+from typing_extensions import AsyncGenerator, Unpack
 
 from autogen_ext.models.azure.config import (
     GITHUB_MODELS_ENDPOINT,
@@ -197,40 +200,90 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
         seed: (optional,int)
         model_extras: (optional,Dict[str, Any])
 
-    To use this client, you must install the `azure-ai-inference` extension:
+    To use this client, you must install the `azure` extra:
 
-        .. code-block:: bash
+    .. code-block:: bash
 
-            pip install "autogen-ext[azure]"
+        pip install "autogen-ext[azure]"
 
-    The following code snippet shows how to use the client:
+    The following code snippet shows how to use the client with GitHub Models:
 
-        .. code-block:: python
+    .. code-block:: python
 
-            import asyncio
-            from azure.core.credentials import AzureKeyCredential
-            from autogen_ext.models.azure import AzureAIChatCompletionClient
-            from autogen_core.models import UserMessage
-
-
-            async def main():
-                client = AzureAIChatCompletionClient(
-                    endpoint="endpoint",
-                    credential=AzureKeyCredential("api_key"),
-                    model_info={
-                        "json_output": False,
-                        "function_calling": False,
-                        "vision": False,
-                        "family": "unknown",
-                    },
-                )
-
-                result = await client.create([UserMessage(content="What is the capital of France?", source="user")])
-                print(result)
+        import asyncio
+        import os
+        from azure.core.credentials import AzureKeyCredential
+        from autogen_ext.models.azure import AzureAIChatCompletionClient
+        from autogen_core.models import UserMessage
 
 
-            if __name__ == "__main__":
-                asyncio.run(main())
+        async def main():
+            client = AzureAIChatCompletionClient(
+                model="Phi-4",
+                endpoint="https://models.github.ai/inference",
+                # To authenticate with the model you will need to generate a personal access token (PAT) in your GitHub settings.
+                # Create your PAT token by following instructions here: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
+                credential=AzureKeyCredential(os.environ["GITHUB_TOKEN"]),
+                model_info={
+                    "json_output": False,
+                    "function_calling": False,
+                    "vision": False,
+                    "family": "unknown",
+                    "structured_output": False,
+                },
+            )
+
+            result = await client.create([UserMessage(content="What is the capital of France?", source="user")])
+            print(result)
+
+            # Close the client.
+            await client.close()
+
+
+        if __name__ == "__main__":
+            asyncio.run(main())
+
+    To use streaming, you can use the `create_stream` method:
+
+    .. code-block:: python
+
+        import asyncio
+        import os
+
+        from autogen_core.models import UserMessage
+        from autogen_ext.models.azure import AzureAIChatCompletionClient
+        from azure.core.credentials import AzureKeyCredential
+
+
+        async def main():
+            client = AzureAIChatCompletionClient(
+                model="Phi-4",
+                endpoint="https://models.github.ai/inference",
+                # To authenticate with the model you will need to generate a personal access token (PAT) in your GitHub settings.
+                # Create your PAT token by following instructions here: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
+                credential=AzureKeyCredential(os.environ["GITHUB_TOKEN"]),
+                model_info={
+                    "json_output": False,
+                    "function_calling": False,
+                    "vision": False,
+                    "family": "unknown",
+                    "structured_output": False,
+                },
+            )
+
+            # Create a stream.
+            stream = client.create_stream([UserMessage(content="Write a poem about the ocean", source="user")])
+            async for chunk in stream:
+                print(chunk, end="", flush=True)
+            print()
+
+            # Close the client.
+            await client.close()
+
+
+        if __name__ == "__main__":
+            asyncio.run(main())
+
 
     """
 
@@ -258,7 +311,10 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
 
     @staticmethod
     def _create_client(config: AzureAIChatCompletionClientConfig) -> ChatCompletionsClient:
-        return ChatCompletionsClient(**config)
+        # Only pass the parameters that ChatCompletionsClient accepts
+        # Remove 'model_info' and other client-specific parameters
+        client_config = {k: v for k, v in config.items() if k not in ("model_info",)}
+        return ChatCompletionsClient(**client_config)  # type: ignore
 
     @staticmethod
     def _prepare_create_args(config: Mapping[str, Any]) -> Dict[str, Any]:
@@ -275,7 +331,7 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
         self,
         messages: Sequence[LLMMessage],
         tools: Sequence[Tool | ToolSchema],
-        json_output: Optional[bool],
+        json_output: Optional[bool | type[BaseModel]],
         create_args: Dict[str, Any],
     ) -> None:
         if self.model_info["vision"] is False:
@@ -287,6 +343,10 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
         if json_output is not None:
             if self.model_info["json_output"] is False and json_output is True:
                 raise ValueError("Model does not support JSON output")
+
+            if isinstance(json_output, type):
+                # TODO: we should support this in the future.
+                raise ValueError("Structured output is not currently supported for AzureAIChatCompletionClient")
 
             if json_output is True and "response_format" not in create_args:
                 create_args["response_format"] = "json_object"
@@ -301,7 +361,8 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
         messages: Sequence[LLMMessage],
         *,
         tools: Sequence[Tool | ToolSchema] = [],
-        json_output: Optional[bool] = None,
+        tool_choice: Tool | Literal["auto", "required", "none"] = "auto",
+        json_output: Optional[bool | type[BaseModel]] = None,
         extra_create_args: Mapping[str, Any] = {},
         cancellation_token: Optional[CancellationToken] = None,
     ) -> CreateResult:
@@ -321,6 +382,12 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
         task: Task[ChatCompletions]
 
         if len(tools) > 0:
+            if isinstance(tool_choice, Tool):
+                create_args["tool_choice"] = ChatCompletionsNamedToolChoice(
+                    function=ChatCompletionsNamedToolChoiceFunction(name=tool_choice.name)
+                )
+            else:
+                create_args["tool_choice"] = tool_choice
             converted_tools = convert_tools(tools)
             task = asyncio.create_task(  # type: ignore
                 self._client.complete(messages=azure_messages, tools=converted_tools, **create_args)  # type: ignore
@@ -353,9 +420,10 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
         )
 
         choice = result.choices[0]
+        thought = None
+
         if choice.finish_reason == CompletionsFinishReason.TOOL_CALLS:
             assert choice.message.tool_calls is not None
-
             content: Union[str, List[FunctionCall]] = [
                 FunctionCall(
                     id=x.id,
@@ -365,6 +433,9 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
                 for x in choice.message.tool_calls
             ]
             finish_reason = "function_calls"
+
+            if choice.message.content:
+                thought = choice.message.content
         else:
             if isinstance(choice.finish_reason, CompletionsFinishReason):
                 finish_reason = choice.finish_reason.value
@@ -374,8 +445,6 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
 
         if isinstance(content, str) and self._model_info["family"] == ModelFamily.R1:
             thought, content = parse_r1_content(content)
-        else:
-            thought = None
 
         response = CreateResult(
             finish_reason=finish_reason,  # type: ignore
@@ -394,7 +463,8 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
         messages: Sequence[LLMMessage],
         *,
         tools: Sequence[Tool | ToolSchema] = [],
-        json_output: Optional[bool] = None,
+        tool_choice: Tool | Literal["auto", "required", "none"] = "auto",
+        json_output: Optional[bool | type[BaseModel]] = None,
         extra_create_args: Mapping[str, Any] = {},
         cancellation_token: Optional[CancellationToken] = None,
     ) -> AsyncGenerator[Union[str, CreateResult], None]:
@@ -412,6 +482,12 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
         azure_messages = [item for sublist in azure_messages_nested for item in sublist]
 
         if len(tools) > 0:
+            if isinstance(tool_choice, Tool):
+                create_args["tool_choice"] = ChatCompletionsNamedToolChoice(
+                    function=ChatCompletionsNamedToolChoiceFunction(name=tool_choice.name)
+                )
+            else:
+                create_args["tool_choice"] = tool_choice
             converted_tools = convert_tools(tools)
             task = asyncio.create_task(
                 self._client.complete(messages=azure_messages, tools=converted_tools, stream=True, **create_args)
@@ -431,6 +507,8 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
         chunk: Optional[StreamingChatCompletionsUpdate] = None
         choice: Optional[StreamingChatChoiceUpdate] = None
         first_chunk = True
+        thought = None
+
         async for chunk in await task:  # type: ignore
             if first_chunk:
                 first_chunk = False
@@ -490,6 +568,9 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
         else:
             content = list(full_tool_calls.values())
 
+            if len(content_deltas) > 0:
+                thought = "".join(content_deltas)
+
         usage = RequestUsage(
             completion_tokens=completion_tokens,
             prompt_tokens=prompt_tokens,
@@ -497,8 +578,6 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
 
         if isinstance(content, str) and self._model_info["family"] == ModelFamily.R1:
             thought, content = parse_r1_content(content)
-        else:
-            thought = None
 
         result = CreateResult(
             finish_reason=finish_reason,
@@ -543,11 +622,3 @@ class AzureAIChatCompletionClient(ChatCompletionClient):
     @property
     def capabilities(self) -> ModelInfo:
         return self.model_info
-
-    def __del__(self) -> None:
-        # TODO: This is a hack to close the open client
-        if hasattr(self, "_client"):
-            try:
-                asyncio.get_running_loop().create_task(self._client.close())
-            except RuntimeError:
-                asyncio.run(self._client.close())
